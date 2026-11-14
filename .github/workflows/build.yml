@@ -1,0 +1,67 @@
+name: build
+on:
+  push:
+    paths:
+      - '*.zip'
+  workflow_dispatch:
+concurrency:
+  group: build
+  cancel-in-progress: true
+permissions:
+  contents: write
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    outputs:
+      deploy: ${{ steps.ci.outputs.deploy }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Unpack the newest zip
+        id: unpack
+        run: |
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ ${#zips[@]} -eq 0 ]; then echo "No .zip in the repo root. Upload lingotrace-wip.zip first."; exit 1; fi
+          zip=$(for f in "${zips[@]}"; do printf '%s\t%s\n' "$(git log -1 --format=%ct -- "$f")" "$f"; done | sort -n | tail -1 | cut -f2-)
+          echo "Using: $zip"
+          rm -rf work && mkdir work && unzip -q -o "$zip" -d work
+          script=$(find work -maxdepth 3 -path '*/scripts/ci.sh' | head -1)
+          if [ -z "$script" ]; then echo "scripts/ci.sh not found inside the zip"; exit 1; fi
+          echo "root=$(dirname "$(dirname "$script")")" >> "$GITHUB_OUTPUT"
+      - name: Pipeline
+        id: ci
+        working-directory: ${{ steps.unpack.outputs.root }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci.sh
+      - name: Pack the site
+        if: ${{ steps.ci.outputs.deploy == 'true' }}
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ steps.unpack.outputs.root }}/dist-site
+      - name: Keep the logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ${{ steps.unpack.outputs.root }}/ci-out
+          if-no-files-found: ignore
+  deploy:
+    needs: check
+    if: ${{ needs.check.outputs.deploy == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
